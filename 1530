@@ -1,0 +1,201 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "id": "b3b40b86",
+   "metadata": {},
+   "source": [
+    "# Data Preprocessing: Craigslist Used Cars\n",
+    "\n",
+    "Raw data: 426,880 postings × 26 columns. Goal: a clean table ready for analysis."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "4e138249",
+   "metadata": {},
+   "source": [
+    "## 1. Load data\n",
+    "\n",
+    "Limits chosen from the raw-data profile:\n",
+    "- **Price:** $500–$150,000 (32,895 prices are 0, about 9,000 more are $1–$499, the max is $3.7 billion).\n",
+    "- **Year:** 1950–2022 (1900 is a placeholder; 2022 is valid for 2021 listings).\n",
+    "- **Odometer:** up to 500,000 miles (99th percentile is 280k; the max is 10,000,000)."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "d197abeb",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "import glob\n",
+    "import pandas as pd\n",
+    "\n",
+    "PRICE_MIN, PRICE_MAX = 500, 150_000\n",
+    "YEAR_MIN, YEAR_MAX = 1950, 2022\n",
+    "ODO_MAX = 500_000\n",
+    "\n",
+    "path = (glob.glob(\"/kaggle/input/**/vehicles.csv\", recursive=True) or glob.glob(\"vehicles.csv\"))[0]\n",
+    "df = pd.read_csv(path)\n",
+    "print(\"Raw shape:\", df.shape)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1f38adbf",
+   "metadata": {},
+   "source": [
+    "## 2. Drop unused columns and clean text\n",
+    "\n",
+    "- Dropped: `id` (a row number added when scraping, so it cannot identify a duplicate), links, `description`, `county` (100% missing), `size` (72% missing), `lat`/`long`.\n",
+    "- `VIN` is kept for now, because step 4 needs it.\n",
+    "- Text is stripped and lowercased so \"Ford\" and \"ford\" match. `VIN` is uppercased.\n",
+    "- `posting_date` becomes a real datetime."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e0fdd4c9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = df.drop(columns=[\"id\", \"url\", \"region_url\", \"image_url\", \"description\",\n",
+    "                      \"county\", \"size\", \"lat\", \"long\"])\n",
+    "\n",
+    "text_cols = [\"region\", \"manufacturer\", \"model\", \"condition\", \"cylinders\", \"fuel\",\n",
+    "             \"title_status\", \"transmission\", \"drive\", \"type\", \"paint_color\", \"state\"]\n",
+    "for c in text_cols:\n",
+    "    df[c] = df[c].str.strip().str.lower()\n",
+    "\n",
+    "df[\"VIN\"] = df[\"VIN\"].str.strip().str.upper()\n",
+    "df[\"posting_date\"] = pd.to_datetime(df[\"posting_date\"], errors=\"coerce\", utc=True)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "d120d28f",
+   "metadata": {},
+   "source": [
+    "## 3. Invalid values\n",
+    "\n",
+    "Rows outside the limits are removed. Missing years and odometers are kept for now and handled in step 5.\n",
+    "\n",
+    "Domain limits are used instead of IQR, because price and odometer are very right-skewed and IQR would remove thousands of normal listings."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "045a1b8c",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = df[df[\"price\"].between(PRICE_MIN, PRICE_MAX)]\n",
+    "print(\"After price filter:\", len(df))\n",
+    "\n",
+    "df = df[df[\"year\"].between(YEAR_MIN, YEAR_MAX) | df[\"year\"].isna()]\n",
+    "print(\"After year filter:\", len(df))\n",
+    "\n",
+    "df = df[(df[\"odometer\"] <= ODO_MAX) | df[\"odometer\"].isna()]\n",
+    "print(\"After odometer filter:\", len(df))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "1b71a84b",
+   "metadata": {},
+   "source": [
+    "## 4. Duplicates\n",
+    "\n",
+    "A duplicate is **the same vehicle posted again**, not a repeated `id`.\n",
+    "\n",
+    "- **Has a VIN (17 characters):** the same VIN means the same vehicle.\n",
+    "- **No VIN:** the same manufacturer, model, year, odometer, price, state and other attributes means the same vehicle.\n",
+    "- The **newest posting is kept**, because its price is the most current."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "7d5ca8b9",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = df.sort_values(\"posting_date\")          # oldest first, so keep=\"last\" keeps the newest\n",
+    "\n",
+    "key = [\"manufacturer\", \"model\", \"year\", \"odometer\", \"price\", \"state\",\n",
+    "       \"condition\", \"cylinders\", \"fuel\", \"transmission\", \"drive\", \"type\", \"paint_color\"]\n",
+    "\n",
+    "has_vin = df[\"VIN\"].str.len() == 17\n",
+    "with_vin = df[has_vin].drop_duplicates(subset=\"VIN\", keep=\"last\")\n",
+    "no_vin = df[~has_vin].drop_duplicates(subset=key, keep=\"last\")\n",
+    "\n",
+    "print(\"Removed by VIN:\", has_vin.sum() - len(with_vin))\n",
+    "print(\"Removed by attributes:\", (~has_vin).sum() - len(no_vin))\n",
+    "\n",
+    "df = pd.concat([with_vin, no_vin]).drop(columns=\"VIN\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "0a96a3af",
+   "metadata": {},
+   "source": [
+    "## 5. Missing values\n",
+    "\n",
+    "- Rows with fewer than 6 of 12 core fields filled are dropped (filling them would invent a car).\n",
+    "- Rows missing `year` or `odometer` are dropped (only about 0.3% and 1%).\n",
+    "- Missing categories become `\"unknown\"`."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "e10bb92a",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "core = [\"year\", \"odometer\", \"manufacturer\", \"model\", \"condition\", \"cylinders\",\n",
+    "        \"fuel\", \"title_status\", \"transmission\", \"drive\", \"type\", \"paint_color\"]\n",
+    "\n",
+    "df = df.dropna(subset=core, thresh=6)\n",
+    "df = df.dropna(subset=[\"year\", \"odometer\"])\n",
+    "df[\"year\"] = df[\"year\"].astype(int)\n",
+    "df[text_cols] = df[text_cols].fillna(\"unknown\")"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "id": "5c756af4",
+   "metadata": {},
+   "source": [
+    "## 6. Final check"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "ec79b9ff",
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "df = df.reset_index(drop=True)\n",
+    "print(\"Final shape:\", df.shape)\n",
+    "print(\"Missing values:\", df.isna().sum().sum())\n",
+    "df[[\"price\", \"year\", \"odometer\"]].describe().round(0)"
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
